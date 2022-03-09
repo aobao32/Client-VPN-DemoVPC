@@ -1,0 +1,241 @@
+Description:  This template for Desktop VPC in AWS global Region
+Parameters:
+  ApplicationServerInstanceType:
+    Description: Choose instance type for application server
+    Type: String
+    Default: t4g.small
+    AllowedValues:
+      - t3.small
+      - t4g.small
+    ConstraintDescription: must be a valid EC2 instance type.
+
+  VPC1CIDR:
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.1.0.0/16
+  VPC1PrivateSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the first Availability Zone
+    Type: String
+    Default: 10.1.101.0/24
+  VPC1PrivateSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the second Availability Zone
+    Type: String
+    Default: 10.1.102.0/24
+
+Mappings:
+  AWSInstanceType2Arch:
+    t3a.small:
+      Arch: HVM64
+    t4g.small:
+      Arch: ARM64
+  AWSRegionArch2AMILinux:
+    eu-central-1: # 此AMI ID为Ubuntu Server 20.04 LTS, 在2022-02-09有效，后续如失效，需要更新
+      HVM64: ami-0d527b8c289b4af7f
+      ARM64: ami-0b168c89474ef4301
+    cn-north-1:
+      HVM64: ami-055d15d9cfddf7bd3
+      ARM64: ami-03d20fc12884694ee
+    
+Resources:
+  # IAM Profile for Session Manager(SSM)
+  SSMRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: 
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
+      Path: /
+      RoleName: EC2SessionManager
+      Tags:
+        - Key: Name
+          Value: EC2SessionManager
+  SSMIAMprofile:
+    Type: "AWS::IAM::InstanceProfile"
+    DependsOn: SSMRole
+    Properties:
+      Path: "/"
+      Roles:
+        -
+          Ref: "SSMRole"
+
+  VPC1:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VPC1CIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: Desktop
+  VPC1PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC1
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref VPC1PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: Desktop-Private-1
+  VPC1PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC1
+      AvailabilityZone: !Select [ 1, !GetAZs  '' ]
+      CidrBlock: !Ref VPC1PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: Desktop-Private-2
+
+  # Private Route table
+  VPC1PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC1
+      Tags:
+        - Key: Name
+          Value: Desktop-Private
+
+  VPC1SecurtiyGroup1:
+    Type: 'AWS::EC2::SecurityGroup'
+    DependsOn: VPC1SecurtiyGroup2
+    Properties:
+      GroupName: AllowSSHInternal
+      GroupDescription: Allow access from VPC Internal
+      VpcId: !Ref VPC1
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: !Ref VPC1CIDR
+          Description: Allow SSH from VPC internal
+        - IpProtocol: tcp
+          FromPort: '8443'
+          ToPort: '8443'
+          CidrIp: !Ref VPC1CIDR
+          Description: Allow NICE DCV from VPC internal
+        - IpProtocol: icmp # allow ping from anywhere
+          FromPort: '8'
+          ToPort: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: Allow Ping from anywhere
+      Tags:
+        - Key: Name
+          Value: AllowSSHInternal
+
+  # SG for SSM endpoint
+  VPC1SecurtiyGroup2:
+    Type: 'AWS::EC2::SecurityGroup'
+    DependsOn: VPC1PrivateSubnet2
+    Properties:
+      GroupName: SSMVPCEndpoint
+      GroupDescription: SSMVPCEndpoint
+      VpcId: !Ref VPC1
+      SecurityGroupIngress:
+        - IpProtocol: tcp 
+          FromPort: '443'
+          ToPort: '443'
+          CidrIp: !Ref VPC1CIDR
+          Description: Allow SSM VPC Endpoint from internal
+      Tags:
+        - Key: Name
+          Value: SSMVPCEndpoint
+
+  # Session Manager VPC Endpoint for private network
+  VPC1SSMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    DependsOn: VPC1SecurtiyGroup2
+    Properties: 
+      PolicyDocument: 
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: '*'
+            Resource: '*'
+      PrivateDnsEnabled: true
+      SecurityGroupIds: 
+        - !Ref VPC1SecurtiyGroup2
+      ServiceName: !Join 
+        - ''
+        - - com.amazonaws.
+          - !Ref 'AWS::Region'
+          - .ssm
+      SubnetIds: 
+        - !Ref VPC1PrivateSubnet1
+        - !Ref VPC1PrivateSubnet2
+      VpcEndpointType: Interface
+      VpcId: !Ref VPC1
+
+  # Session Manager VPC Endpoint for private network
+  VPC1SSMMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    DependsOn: VPC1SecurtiyGroup2
+    Properties: 
+      PolicyDocument: 
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: '*'
+            Resource: '*'
+      PrivateDnsEnabled: true
+      SecurityGroupIds: 
+        - !Ref VPC1SecurtiyGroup2
+      ServiceName: !Join 
+        - ''
+        - - com.amazonaws.
+          - !Ref 'AWS::Region'
+          - .ssmmessages
+      SubnetIds: 
+        - !Ref VPC1PrivateSubnet1
+        - !Ref VPC1PrivateSubnet2
+      VpcEndpointType: Interface
+      VpcId: !Ref VPC1
+
+  # Desktop 1 for testing
+  VPC1VM1:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      ImageId: !FindInMap 
+        - AWSRegionArch2AMILinux
+        - !Ref 'AWS::Region'
+        - !FindInMap 
+          - AWSInstanceType2Arch
+          - !Ref ApplicationServerInstanceType
+          - Arch
+      InstanceType: !Ref ApplicationServerInstanceType
+      IamInstanceProfile: !Ref SSMIAMprofile
+      AvailabilityZone: !Select [ 0, !GetAZs  '' ]
+      SubnetId: !Ref VPC1PrivateSubnet1
+      Monitoring: true
+      BlockDeviceMappings: # Use gp3 as root disk @2021-01-31
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 50
+            DeleteOnTermination: true
+      SecurityGroupIds:
+        - !Ref VPC1SecurtiyGroup1
+      Tags:
+        - Key: Name
+          Value: Desktop-demo-01
+
+Outputs:
+    VPC1:
+      Value: !Ref VPC1
+    VPC1PrivateSubnet1:
+      Value: !Ref VPC1PrivateSubnet1
+    VPC1PrivateSubnet2:
+      Value: !Ref VPC1PrivateSubnet2
+    # Application Server
+    VPC1PrivateIP: 
+      Value: !GetAtt VPC1VM1.PrivateIp
